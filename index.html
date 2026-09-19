@@ -1,0 +1,292 @@
+бл<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>ХИМИКИ Souls</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #111; touch-action: none; font-family: monospace; user-select: none; }
+        #ui { position: absolute; top: 10px; width: 100%; text-align: center; color: white; pointer-events: none; z-index: 10; }
+        .bar-bg { width: 80%; height: 20px; background: #333; margin: 5px auto; border: 2px solid #555; position: relative; }
+        #boss-hp { height: 100%; background: darkred; width: 100%; transition: width 0.2s; }
+        #player-hp { height: 100%; background: green; width: 100%; transition: width 0.2s; }
+        .bar-label { position: absolute; top: 0; left: 5px; font-weight: bold; line-height: 20px; }
+        
+        #controls { position: absolute; bottom: 20px; width: 100%; display: flex; justify-content: space-between; padding: 0 20px; box-sizing: border-box; z-index: 10; }
+        .d-pad { display: grid; grid-template-columns: 50px 50px 50px; grid-template-rows: 50px 50px 50px; gap: 5px; }
+        .btn { background: rgba(255,255,255,0.2); border: 2px solid #fff; color: #fff; border-radius: 10px; font-weight: bold; display: flex; justify-content: center; align-items: center; cursor: pointer; }
+        .btn:active { background: rgba(255,255,255,0.5); }
+        .up { grid-column: 2; grid-row: 1; }
+        .left { grid-column: 1; grid-row: 2; }
+        .right { grid-column: 3; grid-row: 2; }
+        .down { grid-column: 2; grid-row: 3; }
+        
+        .action-btns { display: flex; gap: 10px; align-items: flex-end; }
+        .action-btn { width: 70px; height: 70px; border-radius: 50%; font-size: 12px; cursor: pointer; }
+        
+        #death-screen { display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); color: red; justify-content: center; align-items: center; font-size: 40px; font-weight: bold; z-index: 20; flex-direction: column; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div class="bar-bg"><div id="boss-hp"></div><div class="bar-label">ОЧКО ХИМИКА</div></div>
+        <div class="bar-bg" style="width: 50%;"><div id="player-hp"></div><div class="bar-label">ГЕРОЙ БАМБАНБОЛ (ХП)</div></div>
+    </div>
+    
+    <div id="controls">
+        <div class="d-pad">
+            <div class="btn up" id="btn-up">W</div>
+            <div class="btn left" id="btn-left">A</div>
+            <div class="btn down" id="btn-down">S</div>
+            <div class="btn right" id="btn-right">D</div>
+        </div>
+        <div class="action-btns">
+            <div class="btn action-btn" id="btn-roll">ПЕРЕКАТ</div>
+            <div class="btn action-btn" style="width: 90px; height: 90px; background: rgba(255,0,0,0.3);" id="btn-attack">УДАР</div>
+        </div>
+    </div>
+
+    <div id="death-screen">
+        НУ НИЧЕГО НИЧЕГО
+        <button onclick="location.reload()" style="margin-top: 20px; padding: 10px 20px; font-size: 20px; cursor: pointer;">Новый трай?</button>
+    </div>
+
+    <script>
+        Telegram.WebApp.ready();
+        Telegram.WebApp.expand();
+
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x111111, 0.04);
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const ambient = new THREE.AmbientLight(0x404040);
+        scene.add(ambient);
+        const light = new THREE.PointLight(0xffaa00, 1, 50);
+        light.position.set(0, 10, 0);
+        scene.add(light);
+
+        const floorGeo = new THREE.PlaneGeometry(100, 100);
+        const floorMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        scene.add(floor);
+
+        const playerGeo = new THREE.BoxGeometry(1, 2, 1);
+        const playerMat = new THREE.MeshStandardMaterial({ color: 0x0055ff });
+        const player = new THREE.Mesh(playerGeo, playerMat);
+        player.position.y = 1;
+        scene.add(player);
+
+        const bossGeo = new THREE.BoxGeometry(4, 4, 4);
+        const bossMat = new THREE.MeshStandardMaterial({ color: 0x050505 });
+        const boss = new THREE.Mesh(bossGeo, bossMat);
+        boss.position.set(0, 2, -15);
+        scene.add(boss);
+
+        let pState = { hp: 100, maxHp: 100, speed: 0.15, dir: new THREE.Vector3(0, 0, -1), rolling: false, rollTime: 0, iframes: false, dead: false, attacking: false, attackTime: 0 };
+        let bState = { hp: 500, maxHp: 500, speed: 0.05, state: 'chase', timer: 0 };
+        let input = { up: false, down: false, left: false, right: false };
+
+        // ==========================================
+        // ИНИЦИАЛИЗАЦИЯ МУЗЫКИ
+        // ==========================================
+        const bgMusic = new Audio('battle.mp3');
+        bgMusic.loop = true;
+        bgMusic.volume = 0.5; // Громкость 50%
+        let musicStarted = false;
+
+        function startMusic() {
+            if (!musicStarted) {
+                bgMusic.play().catch(e => console.log("Автовоспроизведение аудио заблокировано", e));
+                musicStarted = true;
+            }
+        }
+        // ==========================================
+
+        camera.position.set(0, 8, 10);
+        camera.lookAt(player.position);
+
+        window.addEventListener('keydown', e => {
+            startMusic(); // Запуск музыки по любой клавише
+            setInput(e.key, true);
+        });
+        window.addEventListener('keyup', e => setInput(e.key, false));
+        
+        function setInput(key, val) {
+            if (key === 'w' || key === 'W' || key === 'ц' || key === 'Ц') input.up = val;
+            if (key === 's' || key === 'S' || key === 'ы' || key === 'Ы') input.down = val;
+            if (key === 'a' || key === 'A' || key === 'ф' || key === 'Ф') input.left = val;
+            if (key === 'd' || key === 'D' || key === 'в' || key === 'В') input.right = val;
+            if (key === ' ' && val) doRoll();
+            if (key === 'e' || key === 'E' || key === 'у' || key === 'У') { if(val) doAttack(); }
+        }
+
+        const bindTouch = (id, key) => {
+            const el = document.getElementById(id);
+            const press = (e) => { e.preventDefault(); startMusic(); input[key] = true; };
+            const release = (e) => { e.preventDefault(); input[key] = false; };
+            el.addEventListener('touchstart', press);
+            el.addEventListener('mousedown', press);
+            el.addEventListener('touchend', release);
+            el.addEventListener('mouseup', release);
+            el.addEventListener('mouseleave', release);
+        };
+        bindTouch('btn-up', 'up'); bindTouch('btn-down', 'down');
+        bindTouch('btn-left', 'left'); bindTouch('btn-right', 'right');
+        
+        const bindAction = (id, action) => {
+            const el = document.getElementById(id);
+            const trigger = (e) => { e.preventDefault(); e.stopPropagation(); startMusic(); action(); };
+            el.addEventListener('touchstart', trigger);
+            el.addEventListener('mousedown', trigger);
+        };
+        bindAction('btn-roll', doRoll);
+        bindAction('btn-attack', doAttack);
+
+        renderer.domElement.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            startMusic(); // Запуск музыки при клике по экрану
+            doAttack();
+        });
+        renderer.domElement.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            startMusic(); // Запуск музыки при тапе по экрану
+            doAttack();
+        });
+
+        function doRoll() {
+            if (pState.rolling || pState.dead || pState.attacking) return;
+            pState.rolling = true;
+            pState.iframes = true;
+            pState.rollTime = 20; 
+            playerMat.color.setHex(0xaaaaaa); 
+        }
+
+        function doAttack() {
+            if (pState.rolling || pState.dead || pState.attacking) return;
+            pState.attacking = true;
+            pState.attackTime = 15; 
+
+            player.position.addScaledVector(pState.dir, 0.7); 
+            
+            if (player.position.distanceTo(boss.position) < 7) {
+                bState.hp -= 25;
+                document.getElementById('boss-hp').style.width = (bState.hp / bState.maxHp * 100) + '%';
+                boss.position.addScaledVector(pState.dir, 0.2); 
+                bossMat.color.setHex(0xffffff); 
+                setTimeout(() => bossMat.color.setHex(0x050505), 100);
+                
+                if (bState.hp <= 0) {
+                    alert("Очко ПОВЕРЖЕНо! БАМБАНБОЛ СВОБОДЕН!");
+                    boss.position.y = -100;
+                }
+            }
+        }
+
+        function takeDamage(amt) {
+            if (pState.iframes || pState.dead) return;
+            pState.hp -= amt;
+            document.getElementById('player-hp').style.width = (pState.hp / pState.maxHp * 100) + '%';
+            playerMat.color.setHex(0xff0000);
+            setTimeout(() => { if (!pState.iframes) playerMat.color.setHex(0x0055ff); }, 200);
+
+            if (pState.hp <= 0) {
+                pState.dead = true;
+                document.getElementById('death-screen').style.display = 'flex';
+                player.rotation.z = Math.PI / 2;
+                player.position.y = 0.5;
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (pState.dead) { renderer.render(scene, camera); return; }
+
+            let moveDir = new THREE.Vector3();
+            if (input.up) moveDir.z -= 1;
+            if (input.down) moveDir.z += 1;
+            if (input.left) moveDir.x -= 1;
+            if (input.right) moveDir.x += 1;
+            
+            if (moveDir.lengthSq() > 0) {
+                moveDir.normalize();
+                if (!pState.rolling && !pState.attacking) pState.dir.copy(moveDir); 
+            }
+
+            if (pState.rolling) {
+                player.position.addScaledVector(pState.dir, pState.speed * 2.5); 
+                pState.rollTime--;
+                player.rotation.x -= 0.3; 
+                if (pState.rollTime <= 0) {
+                    pState.rolling = false;
+                    pState.iframes = false;
+                    player.rotation.x = 0;
+                    playerMat.color.setHex(0x0055ff);
+                }
+            } else if (!pState.attacking) {
+                player.position.addScaledVector(moveDir, pState.speed);
+            }
+
+            if (pState.attacking) {
+                pState.attackTime--;
+                player.rotation.x = -Math.sin((15 - pState.attackTime) / 15 * Math.PI) * 0.8;
+                if (pState.attackTime <= 0) {
+                    pState.attacking = false;
+                    if (!pState.rolling) player.rotation.x = 0;
+                }
+            }
+
+            camera.position.x = player.position.x;
+            camera.position.z = player.position.z + 10;
+
+            if (bState.hp > 0) {
+                let dist = boss.position.distanceTo(player.position);
+                
+                if (bState.state === 'chase') {
+                    boss.rotation.y += 0.01;
+                    boss.rotation.z = Math.sin(Date.now() * 0.005) * 0.1;
+                    
+                    if (dist > 5) {
+                        let toPlayer = player.position.clone().sub(boss.position).normalize();
+                        boss.position.addScaledVector(toPlayer, bState.speed);
+                    } else {
+                        bState.state = 'telegraph';
+                        bState.timer = 40; 
+                    }
+                } 
+                else if (bState.state === 'telegraph') {
+                    bState.timer--;
+                    bossMat.color.setHex(0x880000); 
+                    boss.scale.set(1.1, 1.1, 1.1); 
+                    
+                    if (bState.timer <= 0) {
+                        bState.state = 'attack';
+                        bossMat.color.setHex(0xff0000);
+                        boss.scale.set(1.5, 0.5, 1.5); 
+                        
+                        if (dist < 7) takeDamage(40);
+                        
+                        bState.timer = 30; 
+                    }
+                }
+                else if (bState.state === 'attack') {
+                    bState.timer--;
+                    if (bState.timer <= 0) {
+                        bState.state = 'chase';
+                        bossMat.color.setHex(0x050505);
+                        boss.scale.set(1, 1, 1);
+                    }
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
